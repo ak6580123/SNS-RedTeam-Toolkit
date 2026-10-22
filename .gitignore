@@ -1,0 +1,13 @@
+.venv/
+.venv-wsl/
+.claude/
+__pycache__/
+*.pyc
+/data/
+reports/
+config/config.toml
+.pytest_cache/
+.ruff_cache/
+*.egg-info/
+dist/
+build/

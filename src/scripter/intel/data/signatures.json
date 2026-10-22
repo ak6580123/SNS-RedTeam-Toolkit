@@ -1,0 +1,112 @@
+{
+  "signatures": [
+    {
+      "id": "ftp-anonymous-login",
+      "cve": "N/A - anonymous access misconfiguration",
+      "service_pattern": "^ftp$",
+      "version_pattern": null,
+      "description": "FTP server may allow anonymous login (USER anonymous / PASS anonymous). Verify with the ftp_anonymous_login_check validation check.",
+      "severity": "medium",
+      "exploitability": "trivial",
+      "time_to_validate_minutes": 2,
+      "confidence_base": 0.3,
+      "check": "ftp_anonymous_login_check"
+    },
+    {
+      "id": "vsftpd-234-backdoor",
+      "cve": "CVE-2011-2523",
+      "service_pattern": "^ftp$",
+      "version_pattern": "2\\.3\\.4",
+      "description": "vsftpd 2.3.4 contains a known source-code backdoor: a username containing a smiley face (':)') opens a shell listener on TCP 6200. Scripter does not trigger this backdoor automatically - confirm manually and only within an authorized lab/competition scope.",
+      "severity": "critical",
+      "exploitability": "trivial",
+      "time_to_validate_minutes": 5,
+      "confidence_base": 0.55,
+      "check": null
+    },
+    {
+      "id": "proftpd-133c-backdoor",
+      "cve": "N/A - compromised source tarball, no CVE assigned",
+      "service_pattern": "^ftp$",
+      "version_pattern": "1\\.3\\.3c",
+      "description": "ProFTPD 1.3.3c was distributed from a compromised mirror with a backdoor added to the source tarball (Nov 2010). Manual confirmation required; no automated check implemented.",
+      "severity": "critical",
+      "exploitability": "trivial",
+      "time_to_validate_minutes": 10,
+      "confidence_base": 0.5,
+      "check": null
+    },
+    {
+      "id": "unrealircd-backdoor",
+      "cve": "CVE-2010-2075",
+      "service_pattern": "^irc$",
+      "version_pattern": null,
+      "description": "UnrealIRCd 3.2.8.1 distribution packages (Nov 2009-Jun 2010) contained a backdoored Util.c allowing arbitrary command execution. Service was identified by port/protocol only - confirm the exact build manually before treating this as more than a hypothesis.",
+      "severity": "critical",
+      "exploitability": "trivial",
+      "time_to_validate_minutes": 10,
+      "confidence_base": 0.2,
+      "check": null
+    },
+    {
+      "id": "samba-usermap-script",
+      "cve": "CVE-2007-2447",
+      "service_pattern": "^(smb|microsoft-ds|netbios-ssn)$",
+      "version_pattern": null,
+      "description": "Samba 3.0.20-3.0.25rc3 'username map script' allows remote command execution via shell metacharacters in the username field. Service identified by port only - version could not be fingerprinted by banner; confirm the Samba version manually.",
+      "severity": "critical",
+      "exploitability": "moderate",
+      "time_to_validate_minutes": 15,
+      "confidence_base": 0.2,
+      "check": null
+    },
+    {
+      "id": "openssh-legacy-eol",
+      "cve": "N/A - end-of-life version, multiple historical CVEs may apply to the exact build",
+      "service_pattern": "^ssh$",
+      "version_pattern": "OpenSSH[_-][1-4]\\.|OpenSSH[_-]5\\.[0-3]",
+      "description": "OpenSSH version banner indicates an old, end-of-life release. Check the exact point release against known CVEs for that version before treating this as more than a lead.",
+      "severity": "medium",
+      "exploitability": "moderate",
+      "time_to_validate_minutes": 10,
+      "confidence_base": 0.3,
+      "check": null
+    },
+    {
+      "id": "tomcat-default-manager",
+      "cve": "N/A - default credential misconfiguration",
+      "service_pattern": "^http",
+      "version_pattern": "Coyote",
+      "description": "Apache Tomcat detected (Coyote connector in the Server header). The /manager/html console, if exposed with default or weak credentials, allows WAR upload and remote code execution. Scripter does not attempt credential login automatically (avoids brute force) - check manually.",
+      "severity": "high",
+      "exploitability": "trivial",
+      "time_to_validate_minutes": 10,
+      "confidence_base": 0.2,
+      "check": null
+    },
+    {
+      "id": "redis-unauthenticated",
+      "cve": "N/A - missing authentication; related RCE paths documented under CVE-2022-24735/CVE-2022-24736",
+      "service_pattern": "^redis$",
+      "version_pattern": null,
+      "description": "Redis instance may accept commands without authentication. Verify with the redis_unauthenticated_check validation check, which only issues PING.",
+      "severity": "high",
+      "exploitability": "trivial",
+      "time_to_validate_minutes": 5,
+      "confidence_base": 0.4,
+      "check": "redis_unauthenticated_check"
+    },
+    {
+      "id": "tls-weak-protocol",
+      "cve": "N/A - protocol downgrade exposure; see CVE-2014-3566 (POODLE) for the SSLv3 case",
+      "service_pattern": "^https?$",
+      "version_pattern": null,
+      "description": "Service may still negotiate SSLv3/TLS1.0. Verify with the tls_weak_protocol_check validation check, which only performs a handshake.",
+      "severity": "medium",
+      "exploitability": "moderate",
+      "time_to_validate_minutes": 5,
+      "confidence_base": 0.3,
+      "check": "tls_weak_protocol_check"
+    }
+  ]
+}

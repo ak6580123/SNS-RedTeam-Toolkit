@@ -1,0 +1,47 @@
+# Scripter red-team configuration. Copy this file to config/config.toml
+# and edit it before running any active command. There is no default
+# scope - [scope] targets must be set explicitly, or discover/enumerate/
+# vuln-map/validate will all refuse to run.
+
+[scope]
+# One or more hosts/CIDR ranges you are explicitly authorized to target,
+# e.g. a competition-provided range or an isolated lab network.
+# Example: targets = ["10.10.1.0/24", "10.10.2.5"]
+targets = []
+# Set true only if the competition explicitly assigns public IP ranges.
+allow_public = false
+# Safety valve against an overly broad CIDR typo expanding into a huge sweep.
+max_hosts = 4096
+
+[storage]
+data_dir = "data"
+reports_dir = "reports"
+db_path = "data/scripter.db"
+
+[logging]
+level = "INFO"          # DEBUG, INFO, WARNING, ERROR
+log_dir = "data/logs"
+max_bytes = 5000000
+backup_count = 3
+
+[scan]
+# Ports probed during discover/enumerate. Narrow this to the target OS's
+# actual service mix once known, to keep sweeps fast and focused.
+ports = [
+    21, 22, 23, 25, 53, 80, 110, 111, 135, 139, 143, 443, 445, 993, 995,
+    1433, 1521, 2049, 3306, 3389, 5432, 5900, 6379, 6667, 8000, 8080, 8443, 9200, 27017,
+]
+timeout_seconds = 2.0
+# Bounded concurrency - keep this well under anything that could look like
+# a stress test against shared competition infrastructure.
+max_concurrency = 50
+# Optional richer version detection via `nmap -sV` (read-only; no NSE
+# vuln/exploit scripts, no raw-socket scanning). Requires nmap on PATH.
+use_nmap = false
+
+[validate]
+# Opt-in gate for the non-destructive validation checks in
+# validation/checks.py (anonymous FTP login, unauthenticated Redis PING,
+# weak TLS handshake). Leave false until you've confirmed scope is correct.
+enabled = false
+timeout_seconds = 5.0
