@@ -17,6 +17,7 @@ blanket automation - see docs/security-model.md.
 from __future__ import annotations
 
 import dataclasses
+import re
 import socket
 import ssl
 from typing import Callable
@@ -110,10 +111,38 @@ def tls_weak_protocol_check(match: VulnMatch, scope: Scope, timeout: float) -> C
     return MatchStatus.CONFIRMED, 0.9, f"server negotiated weak protocol version: {version}"
 
 
+_LEGACY_OPENSSH_RE = re.compile(r"OpenSSH[_-](?:[1-4]\.|5\.[0-3])", re.IGNORECASE)
+_OPENSSH_RE = re.compile(r"OpenSSH[_-][\w.]+", re.IGNORECASE)
+
+
+def openssh_legacy_version_check(match: VulnMatch, scope: Scope, timeout: float) -> CheckResult:
+    """Read the SSH identification string the server sends unprompted,
+    before any key exchange (RFC 4253 requires this), and compare it
+    against the same legacy-OpenSSH pattern the ``openssh-legacy-eol``
+    signature matches on. No key exchange, no authentication - this is a
+    passive re-read of a string the server always sends first."""
+    require_in_scope(match.host, scope)
+    try:
+        with socket.create_connection((match.host, match.port), timeout=timeout) as sock:
+            sock.settimeout(timeout)
+            banner = sock.recv(256).decode("utf-8", errors="replace").strip()
+    except (OSError, socket.timeout) as exc:
+        return MatchStatus.INCONCLUSIVE, match.confidence, f"check failed: could not connect/read banner: {exc}"
+
+    if not banner.startswith("SSH-"):
+        return MatchStatus.INCONCLUSIVE, match.confidence, f"no SSH identification string observed: {banner!r}"
+    if _LEGACY_OPENSSH_RE.search(banner):
+        return MatchStatus.CONFIRMED, 0.8, f"legacy/EOL OpenSSH version banner: {banner!r}"
+    if _OPENSSH_RE.search(banner):
+        return MatchStatus.RULED_OUT, 0.1, f"current OpenSSH version banner: {banner!r}"
+    return MatchStatus.INCONCLUSIVE, match.confidence, f"non-OpenSSH or unrecognized SSH banner: {banner!r}"
+
+
 CHECKS: dict[str, CheckFn] = {
     "ftp_anonymous_login_check": ftp_anonymous_login_check,
     "redis_unauthenticated_check": redis_unauthenticated_check,
     "tls_weak_protocol_check": tls_weak_protocol_check,
+    "openssh_legacy_version_check": openssh_legacy_version_check,
 }
 
 

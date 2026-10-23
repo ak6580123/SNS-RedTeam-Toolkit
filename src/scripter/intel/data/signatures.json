@@ -70,7 +70,7 @@
       "exploitability": "moderate",
       "time_to_validate_minutes": 10,
       "confidence_base": 0.3,
-      "check": null
+      "check": "openssh_legacy_version_check"
     },
     {
       "id": "tomcat-default-manager",

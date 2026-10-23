@@ -80,6 +80,17 @@ class Store:
         self._conn.executescript(_SCHEMA)
         self._conn.commit()
 
+    @property
+    def connection(self) -> sqlite3.Connection:
+        """Exposed so redteam/storage.py can extend this same SQLite file
+        with its own tables/lock discipline instead of opening a second
+        database connection or duplicating the schema-migration pattern."""
+        return self._conn
+
+    @property
+    def lock(self) -> threading.Lock:
+        return self._lock
+
     def close(self) -> None:
         with self._lock:
             self._conn.close()

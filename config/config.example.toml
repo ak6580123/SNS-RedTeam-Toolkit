@@ -45,3 +45,55 @@ use_nmap = false
 # weak TLS handshake). Leave false until you've confirmed scope is correct.
 enabled = false
 timeout_seconds = 5.0
+
+[redteam]
+# Master switch for the redteam/ planning+execution extension. Planning
+# (`scripter redteam plan`), `list-tools`, and `simulate` stay available
+# even when this is left at its default - they are offline/deterministic
+# by construction. Only real network audits/external tools are
+# separately gated below.
+enabled = true
+# Deterministic offline mock execution (`scripter redteam simulate`) -
+# safe by default, never touches the network.
+simulate_enabled = true
+# Real network-touching audits (http_audit/tls_audit/ftp_audit/
+# redis_audit/ssh_audit/smtp_audit/mysql_audit/diagnostics via
+# `scripter redteam audit-*`/`diagnostics`). Leave false until scope is
+# confirmed correct, same as [validate].
+network_audits_enabled = false
+# External tool adapters (currently: nmap_adapter, which just wraps the
+# existing nmap -sV wrapper). Requires nmap on PATH regardless of this
+# flag; this additionally gates whether redteam will ever invoke it.
+external_tools_enabled = false
+max_concurrency = 10
+timeout_seconds = 5.0
+# Hard cap on bytes read from any single HTTP(S) audit response.
+max_response_bytes = 65536
+# Which tool categories redteam is allowed to run at all. Narrow this to
+# restrict the toolkit to a subset (e.g. ["http", "tls"]) for a
+# specific competition.
+allowed_categories = ["http", "tls", "ftp", "redis", "ssh", "smtp", "mysql", "diagnostics", "nmap", "passive"]
+# Evidence strings are redacted (see redteam/results.py) and then capped
+# at this length before being stored or reported.
+max_evidence_chars = 2000
+
+[intel]
+# Opt-in gate for the Findings tab's "Look up CVEs (NVD)" button and the
+# `scripter cve-lookup` CLI command (intel/cve_lookup.py) - the only
+# outbound call in this toolkit that targets a third party (the public
+# NVD CVE API) instead of something inside [scope]. Leave false until
+# you've confirmed this box has (or should have) internet access.
+cve_lookup_enabled = false
+cve_lookup_timeout_seconds = 10.0
+# NVD results requested per service/version pair.
+cve_lookup_max_results = 5
+# Hard cap on how many distinct service/version pairs one bulk lookup
+# will query, so a large run doesn't turn into dozens of outbound requests.
+cve_lookup_max_pairs = 15
+# Pause between pairs - NVD's public rate limit without an API key is
+# 5 requests/30s; 6s keeps a multi-pair lookup comfortably under that.
+cve_lookup_delay_seconds = 6.0
+# Optional NVD API key (https://nvd.nist.gov/developers/request-an-api-key)
+# raises the rate limit to 50 requests/30s. Leave blank to use the public
+# rate limit.
+nvd_api_key = ""

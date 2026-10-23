@@ -180,6 +180,66 @@ scripter run-all --validate --formats json,csv,html
 
 ---
 
+## Red-team extension (`scripter redteam ...`)
+
+An offline **planning** stage plus a set of bounded, scope-gated **audit
+tools**, layered on top of the pipeline above:
+
+```
+ vuln-map     (produces VulnMatch rows, same as before)
+     │
+     ▼
+ redteam plan     deterministic, offline - maps each match to one audit
+     │            tool by service, ranks by the same severity x confidence
+     │            x exploitability score `report` already uses, skips
+     │            out-of-scope/ruled-out/unmapped findings
+     ▼
+ redteam simulate     deterministic offline mock - exercises the whole
+     │                 plan -> result -> storage -> report path with
+     │                 zero network access
+     ▼
+ redteam audit-http / audit-tls / audit-ftp / audit-redis / diagnostics
+                       the same plan items, for real, scope-gated at the
+                       point of connection - never auto-run, always opt-in
+```
+
+| Command | What it does | Touches the network? |
+|---|---|---|
+| `scripter redteam list-tools` | Lists every registered tool | No |
+| `scripter redteam plan` | Builds a deterministic attack plan from a run's vuln-map matches | No |
+| `scripter redteam simulate` | Runs the saved plan through the deterministic mock executor | No |
+| `scripter redteam audit-http --host H [--port 80]` | Bounded GET + security-header review | Yes |
+| `scripter redteam audit-tls --host H [--port 443]` | Certificate metadata + negotiated protocol/cipher | Yes |
+| `scripter redteam audit-ftp --host H [--port 21]` | Passive banner + (if `[validate] enabled`) anonymous-login check | Yes |
+| `scripter redteam audit-redis --host H [--port 6379]` | Passive banner + (if `[validate] enabled`) unauthenticated-PING check | Yes |
+| `scripter redteam diagnostics` | Compares this run's host/port availability against the previous run | No (local DB only) |
+
+Every real audit is gated by `[redteam] network_audits_enabled = true`
+*and* the existing `scope.require_in_scope` check, on top of each tool's
+own category/validate-enabled gate (see `config/config.example.toml`'s
+`[redteam]` section and [`docs/security-model.md`](docs/security-model.md)).
+`list-tools`/`plan`/`simulate` are deliberately exempt from all of that —
+they are offline and deterministic by construction, so there's nothing to
+gate.
+
+A plan item's result is always one of `completed` / `failed` / `blocked`
+/ `inconclusive`, and a *simulated* result is always labelled
+`SIMULATED:` in its evidence — never mistake a mock run for a real one.
+
+```powershell
+# Fully offline: plan + simulate, no target ever contacted
+scripter redteam plan
+scripter redteam simulate
+
+# Real, explicitly scoped audit (requires network_audits_enabled = true)
+scripter redteam audit-http --host 10.10.1.5 --port 80
+
+# Include redteam results in the run's reports
+scripter report --redteam --formats json,csv,html
+```
+
+---
+
 ## TUI dashboard
 
 ```powershell
@@ -201,7 +261,13 @@ and whether validation is enabled.
 | `r` | **r**eport — write JSON/CSV/HTML for the current run |
 | `a` | run-**a**ll — the full pipeline in one go |
 | `s` | set/edit **s**cope targets without leaving the TUI |
+| `p` | redteam-**p**lan — deterministic offline attack plan from the current findings |
+| `x` | redteam-simulate (**x**ecute, mock) — run the plan through the offline simulator |
 | `q` | **q**uit |
+
+A fifth "Red Team" tab shows the current plan/results. Real network
+audits are CLI-only (`scripter redteam audit-*`) for now — the TUI's `x`
+key only ever runs the deterministic offline simulator.
 
 Findings are color-coded by severity (critical/high/medium/low) and
 status (confirmed/hypothesis/inconclusive/ruled_out). Reopening the TUI

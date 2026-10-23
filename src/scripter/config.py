@@ -50,6 +50,47 @@ class ValidateConfig:
 
 
 @dataclasses.dataclass(frozen=True)
+class RedTeamConfig:
+    """Gates for the redteam/ planning+execution extension. ``enabled``
+    only governs the master switch for the feature existing at all -
+    planning, list-tools, and simulation stay available regardless of it
+    (they're offline/deterministic by construction); real network audits
+    and external-tool adapters each have their own, separately-gated
+    flag below, matching the project's existing [validate] enabled
+    pattern."""
+
+    enabled: bool
+    simulate_enabled: bool
+    network_audits_enabled: bool
+    external_tools_enabled: bool
+    max_concurrency: int
+    timeout_seconds: float
+    max_response_bytes: int
+    allowed_categories: tuple[str, ...]
+    max_evidence_chars: int
+
+
+@dataclasses.dataclass(frozen=True)
+class IntelConfig:
+    """Gates the only outbound call in this codebase that targets a third
+    party instead of something inside ``[scope]``: looking up CVEs for an
+    enumerated service/version against the public NVD CVE API (see
+    ``intel/cve_lookup.py``). Off by default - the same opt-in-network
+    pattern as ``[validate] enabled``/``[redteam] network_audits_enabled`` -
+    so an air-gapped lab/competition network doesn't get a surprise
+    external request just from opening the Findings tab or running
+    ``scripter cve-lookup``.
+    """
+
+    cve_lookup_enabled: bool
+    cve_lookup_timeout_seconds: float
+    cve_lookup_max_results: int
+    cve_lookup_max_pairs: int
+    cve_lookup_delay_seconds: float
+    nvd_api_key: str
+
+
+@dataclasses.dataclass(frozen=True)
 class Config:
     scope: Scope
     scope_allow_public: bool
@@ -58,6 +99,8 @@ class Config:
     logging: LoggingConfig
     scan: ScanConfig
     validate: ValidateConfig
+    redteam: RedTeamConfig
+    intel: IntelConfig
     path: Path
 
 
@@ -149,10 +192,47 @@ def load_config(path: Path, *, allow_empty_scope: bool = False) -> Config:
         timeout_seconds=float(validate_section.get("timeout_seconds", 5.0)),
     )
 
+    redteam_section = raw.get("redteam", {})
+    allowed_categories_raw = redteam_section.get(
+        "allowed_categories",
+        ["http", "tls", "ftp", "redis", "ssh", "smtp", "mysql", "diagnostics", "nmap", "passive"],
+    )
+    if not isinstance(allowed_categories_raw, list) or not all(isinstance(c, str) for c in allowed_categories_raw):
+        raise ConfigError("[redteam] allowed_categories must be a list of strings")
+    redteam_cfg = RedTeamConfig(
+        enabled=bool(redteam_section.get("enabled", True)),
+        simulate_enabled=bool(redteam_section.get("simulate_enabled", True)),
+        network_audits_enabled=bool(redteam_section.get("network_audits_enabled", False)),
+        external_tools_enabled=bool(redteam_section.get("external_tools_enabled", False)),
+        max_concurrency=_require_int(redteam_section.get("max_concurrency", 10), "redteam.max_concurrency", minimum=1),
+        timeout_seconds=float(redteam_section.get("timeout_seconds", 5.0)),
+        max_response_bytes=_require_int(
+            redteam_section.get("max_response_bytes", 65536), "redteam.max_response_bytes", minimum=1
+        ),
+        allowed_categories=tuple(allowed_categories_raw),
+        max_evidence_chars=_require_int(
+            redteam_section.get("max_evidence_chars", 2000), "redteam.max_evidence_chars", minimum=1
+        ),
+    )
+
+    intel_section = raw.get("intel", {})
+    intel_cfg = IntelConfig(
+        cve_lookup_enabled=bool(intel_section.get("cve_lookup_enabled", False)),
+        cve_lookup_timeout_seconds=float(intel_section.get("cve_lookup_timeout_seconds", 10.0)),
+        cve_lookup_max_results=_require_int(
+            intel_section.get("cve_lookup_max_results", 5), "intel.cve_lookup_max_results", minimum=1
+        ),
+        cve_lookup_max_pairs=_require_int(
+            intel_section.get("cve_lookup_max_pairs", 15), "intel.cve_lookup_max_pairs", minimum=1
+        ),
+        cve_lookup_delay_seconds=float(intel_section.get("cve_lookup_delay_seconds", 6.0)),
+        nvd_api_key=str(intel_section.get("nvd_api_key", "")),
+    )
+
     return Config(
         scope=scope, scope_allow_public=allow_public, scope_max_hosts=max_hosts,
         storage=storage, logging=logging_cfg,
-        scan=scan_cfg, validate=validate_cfg, path=path,
+        scan=scan_cfg, validate=validate_cfg, redteam=redteam_cfg, intel=intel_cfg, path=path,
     )
 
 

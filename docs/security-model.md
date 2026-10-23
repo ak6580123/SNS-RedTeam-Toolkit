@@ -118,9 +118,78 @@ every logged field is a specific value a module already extracted
 All data stays on the local machine: `data/scripter.db` (SQLite - hosts,
 services, vuln matches per run), `data/logs/scripter.log` (rotating log
 file), and `reports/` (generated JSON/CSV/HTML reports). Nothing is sent
-anywhere. Scripter never calls an LLM or cloud API and never requires
-internet access to function (the signature dataset is bundled, not
-fetched).
+anywhere, and Scripter never calls an LLM or cloud API. Scripter does not
+*require* internet access to function (the signature dataset is bundled,
+not fetched) - the one opt-in exception is `intel/cve_lookup.py`'s CVE
+lookup against the public NVD CVE API, reachable from the Findings tab's
+"Look up CVEs (NVD)" button or `scripter cve-lookup`, gated off by default
+behind `[intel] cve_lookup_enabled`. Enabling it sends only a service name
+and version string (e.g. `"OpenSSH 7.2"`) to `services.nvd.nist.gov` -
+never a target host/IP, port, banner, or anything else from `[scope]`.
+
+## The redteam/ extension's safety gates
+
+The `redteam/` planning+execution extension adds no new scope or storage
+implementation - it reuses `scope.require_in_scope` and the existing
+`Store`'s connection/lock exactly as every other module does. On top of
+that, `redteam/executor.py`'s `execute_item` is the single place a plan
+item can ever reach the network, and checks, in this exact order, before
+any tool runs for real:
+
+1. `simulate_only=True` always wins - a simulated run never reaches any
+   gate below this one, and never imports `socket`/`subprocess`.
+2. `[redteam] network_audits_enabled` - the master real-audit switch.
+3. `[redteam] external_tools_enabled` - external-adapter tools only
+   (currently just `nmap_adapter`, which itself only wraps the existing
+   `run_nmap_version_scan` - no new nmap flags).
+4. `[redteam] allowed_categories` - lets an operator narrow the toolkit
+   to a subset for a specific competition.
+5. `[validate] enabled` - for the two tools that authenticate
+   (`ftp_audit`/`redis_audit`), which only ever delegate to the EXISTING
+   `ftp_anonymous_login_check`/`redis_unauthenticated_check` - no new
+   authentication logic is added anywhere in `redteam/`.
+6. `scope.require_in_scope` - re-checked here, at the point of action,
+   exactly like every other active function in the codebase.
+
+A tool raising an exception degrades to a `FAILED` `ToolResult` rather
+than crashing the run or retrying, mirroring `run_validation`'s own
+contract. `[redteam] enabled` only gates the feature's own master switch;
+`list-tools`/`plan`/`simulate` stay available regardless, because they
+are offline and deterministic by construction - `planner.build_plan`
+never imports `socket`, `subprocess`, or `http.client`, and
+`tools/simulate.py`'s outcome is a pure hash of the plan item's own
+fields, not a random number.
+
+`redteam/results.sanitize_evidence` redacts `Authorization:`/
+`Set-Cookie:`/`password=`/`token=`/`api_key=`-shaped substrings and caps
+every evidence string's length before it is ever stored or reported -
+every tool module in `redteam/tools/` routes its evidence through it.
+
+`http_audit` uses `http.client` (not `urllib.request`) specifically
+because it never auto-follows a redirect - a `Location` header is always
+surfaced as evidence, never contacted. `tls_audit`'s certificate-metadata
+read uses a normal, verifying handshake; the one place certificate
+verification is intentionally disabled remains the pre-existing,
+unchanged `tls_weak_protocol_check`, which `tls_audit` only ever calls
+through, never reimplements.
+
+`ssh_audit`, `smtp_audit`, and `mysql_audit` follow the same "read what
+the protocol sends unprompted, or issue at most one benign,
+non-authenticating command" shape as the tools above. None of the three
+require `[validate] enabled` - `ssh_audit` only re-reads the
+identification string every SSH server sends before any key exchange
+(via the new `openssh_legacy_version_check`); `smtp_audit` sends a
+single `EHLO`/`QUIT` and deliberately never sends `VRFY`/`EXPN` (which
+can enumerate real mailboxes) or an actual message; `mysql_audit` only
+reads the handshake packet a MySQL server sends on connect and never
+attempts a login.
+
+**Still deliberately not implemented anywhere in `redteam/`:** credential
+brute forcing, triggering known backdoors, web crawling or form
+submission, file upload/download, Redis write commands or key
+enumeration, service restart/modification, or any exploit that reads or
+writes target state. A completed audit is an *observation* - it is never
+reported, logged, or described as a confirmed exploit or a captured flag.
 
 ## Deliberately out of scope (not deferred - excluded by design)
 
