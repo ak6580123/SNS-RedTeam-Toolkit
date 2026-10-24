@@ -55,6 +55,7 @@ def _now() -> dt.datetime:
 
 
 def _blocked(item: AttackPlanItem, run_id: int, started: dt.datetime, reason: str) -> ToolResult:
+    log.info("run=%s blocked %s against %s:%s: %s", run_id, item.tool_name, item.host, item.port, reason)
     return ToolResult(
         run_id=run_id, host=item.host, port=item.port, tool_name=item.tool_name,
         status=ExecutionStatus.BLOCKED, simulated=False, started_at=started, finished_at=_now(),
@@ -70,7 +71,12 @@ def execute_item(
     started = _now()
 
     if simulate_only:
+        log.info("run=%s simulate %s against %s:%s", run_id, item.tool_name, item.host, item.port)
         status, evidence = simulate.run(item)
+        log.info(
+            "run=%s simulate %s against %s:%s -> %s: %s",
+            run_id, item.tool_name, item.host, item.port, status.value, evidence,
+        )
         return ToolResult(
             run_id=run_id, host=item.host, port=item.port, tool_name=item.tool_name,
             status=status, simulated=True, started_at=started, finished_at=_now(), evidence=evidence, error=None,
@@ -91,6 +97,7 @@ def execute_item(
     except ScopeError as exc:
         return _blocked(item, run_id, started, str(exc))
 
+    log.info("run=%s run %s against %s:%s", run_id, item.tool_name, item.host, item.port)
     try:
         evidence = _dispatch(item, cfg, store, run_id)
         status = ExecutionStatus.COMPLETED
@@ -101,6 +108,10 @@ def execute_item(
         evidence = f"tool execution failed: {exc}"
         error = str(exc)
 
+    log.info(
+        "run=%s run %s against %s:%s -> %s: %s",
+        run_id, item.tool_name, item.host, item.port, status.value, evidence,
+    )
     return ToolResult(
         run_id=run_id, host=item.host, port=item.port, tool_name=item.tool_name,
         status=status, simulated=False, started_at=started, finished_at=_now(), evidence=evidence, error=error,

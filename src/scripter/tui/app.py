@@ -17,7 +17,9 @@ from __future__ import annotations
 import dataclasses
 import datetime as dt
 import time
+import webbrowser
 from pathlib import Path
+from urllib.parse import quote
 
 from textual import work
 from textual.app import App, ComposeResult
@@ -169,12 +171,12 @@ class ScopeEditorScreen(ModalScreen[Scope | None]):
 class ServiceActionsScreen(ModalScreen[None]):
     """Modal opened by clicking a row in the Services table.
 
-    Lets you run (or offline-simulate) the red-team tool(s) appropriate
-    for that one host:port:service. Re-uses redteam.executor.execute_item
-    exactly as the CLI's ``redteam audit-*``/``redteam simulate`` commands
-    do - no new gating logic here; scope/category/network/validate checks
-    all still run inside execute_item, so a blocked/disabled tool just
-    reports BLOCKED instead of silently doing nothing.
+    Lets you run the red-team tool(s) appropriate for that one
+    host:port:service. Re-uses redteam.executor.execute_item exactly as the
+    CLI's ``redteam audit-*`` commands do - no new gating logic here;
+    scope/category/network/validate checks all still run inside
+    execute_item, so a blocked/disabled tool just reports BLOCKED instead
+    of silently doing nothing.
     """
 
     CSS = f"""
@@ -238,11 +240,9 @@ class ServiceActionsScreen(ModalScreen[None]):
     def compose(self) -> ComposeResult:
         with Vertical(id="actions_dialog"):
             yield Label(f"{self._host}:{self._port} ({self._service or 'unknown service'})", id="actions_target")
-            yield Label("pick a red-team tool - Simulate is an offline deterministic mock, Run performs the real, scope-gated action:")
+            yield Label("pick a red-team tool to run - the real, scope-gated action:")
             with Horizontal(id="actions_tools"):
                 for tool_name in self._tools:
-                    if self._service != "ssh":
-                        yield Button(f"Simulate {tool_name}", id=f"sim__{tool_name}")
                     yield Button(f"Run {tool_name}", variant="warning", id=f"run__{tool_name}")
             yield RichLog(id="actions_log", highlight=True, markup=True, wrap=True)
             with Horizontal(id="actions_close"):
@@ -253,20 +253,17 @@ class ServiceActionsScreen(ModalScreen[None]):
         if button_id == "close":
             self.dismiss(None)
             return
-        if button_id.startswith("sim__"):
-            self._launch(button_id[len("sim__"):], simulate_only=True)
-        elif button_id.startswith("run__"):
-            self._launch(button_id[len("run__"):], simulate_only=False)
+        if button_id.startswith("run__"):
+            self._launch(button_id[len("run__"):])
 
-    def _launch(self, tool_name: str, *, simulate_only: bool) -> None:
-        mode = "simulate" if simulate_only else "run"
+    def _launch(self, tool_name: str) -> None:
         self.query_one("#actions_log", RichLog).write(
-            f"[cyan]{mode}: {tool_name} against {self._host}:{self._port}...[/]"
+            f"[cyan]run: {tool_name} against {self._host}:{self._port}...[/]"
         )
-        self._execute(tool_name, simulate_only)
+        self._execute(tool_name)
 
     @work(thread=True, exclusive=False)
-    def _execute(self, tool_name: str, simulate_only: bool) -> None:
+    def _execute(self, tool_name: str) -> None:
         item = AttackPlanItem(
             host=self._host, port=self._port, service=self._service or "unknown", signature_id="tui-adhoc",
             tool_name=tool_name, rationale="launched from the TUI Services screen", prerequisites=(),
@@ -274,7 +271,7 @@ class ServiceActionsScreen(ModalScreen[None]):
             manual_review_required=False, source_status=MatchStatus.HYPOTHESIS.value, source_score=0.0,
         )
         run_id = self._run_id or self._store.latest_run_id() or self._store.start_run("tui-adhoc")
-        result = execute_item(item, self._cfg, simulate_only=simulate_only, run_id=run_id, store=self._store)
+        result = execute_item(item, self._cfg, simulate_only=False, run_id=run_id, store=self._store)
         self._redteam_store.save_results([result])
         self.app.call_from_thread(self._apply_result, result)
 
@@ -286,75 +283,84 @@ class ServiceActionsScreen(ModalScreen[None]):
             app.refresh_redteam_results()
 
 
-class CveResultsScreen(ModalScreen[None]):
-    """Modal opened by the Findings tab's "Look up CVEs (NVD)" button.
+class CveDetailScreen(ModalScreen[None]):
+    """Modal opened by clicking a row in the CVEs tab's results table.
 
-    Shows, for every distinct (service, version) pair across the current
-    run's findings, whatever the public NVD CVE API returned for it (or
-    the lookup error, if any) - a per-pair failure never hides the
-    others. Pure display: the actual network calls already happened in
-    ``ScripterApp.worker_cve_lookup`` before this screen is pushed.
+    Shows the full NVD record for the one CVE that was clicked, and offers
+    an "Explain with AI" button that opens the user's default browser on
+    ChatGPT with a ready-made prompt about this CVE pre-filled via its
+    ``?q=`` query parameter - the same prefill mechanism Streamlit's
+    chat-link widget uses, so there is no API key and no extra network
+    call from this process itself.
     """
 
     CSS = f"""
-    CveResultsScreen {{
+    CveDetailScreen {{
         align: center middle;
     }}
-    #cve_dialog {{
-        width: 100;
+    #cve_detail_dialog {{
+        width: 96;
         height: auto;
         max-height: 90%;
         border: round {_ACCENT};
         background: #0a0e0b;
         padding: 1 2;
     }}
-    #cve_dialog Label {{
+    #cve_detail_dialog Label {{
         color: {_ACCENT};
     }}
-    #cve_log {{
+    #cve_detail_body {{
         border: round {_ACCENT};
-        height: 20;
+        height: 16;
         color: #7cfc9b;
     }}
-    #cve_close {{
+    #cve_detail_buttons {{
         margin-top: 1;
         align: right middle;
     }}
     """
 
-    def __init__(self, grouped: list[tuple[str, str, list[CveResult] | None, str | None]]):
+    def __init__(self, service: str, version: str, result: CveResult):
         super().__init__()
-        self._grouped = grouped
+        self._service = service
+        self._version = version
+        self._result = result
 
     def compose(self) -> ComposeResult:
-        with Vertical(id="cve_dialog"):
-            yield Label("NVD CVE lookup results - one outbound query per distinct service/version pair:")
-            yield RichLog(id="cve_log", highlight=True, markup=True, wrap=True)
-            with Horizontal(id="cve_close"):
+        label = f"{self._service}:{self._version}" if self._version else self._service
+        with Vertical(id="cve_detail_dialog"):
+            yield Label(f"{self._result.cve_id} - {label}")
+            yield RichLog(id="cve_detail_body", highlight=True, markup=True, wrap=True)
+            with Horizontal(id="cve_detail_buttons"):
+                yield Button("Explain with AI", variant="primary", id="explain_ai")
                 yield Button("Close", id="close")
 
     def on_mount(self) -> None:
-        log = self.query_one("#cve_log", RichLog)
-        for service, version, results, error in self._grouped:
-            label = f"{service}:{version}" if version else service
-            log.write(f"[bold {_ACCENT}]{label}[/]")
-            if error is not None:
-                log.write(f"  [red]lookup failed:[/] {error}")
-                continue
-            if not results:
-                log.write("  [dim]no CVEs found[/]")
-                continue
-            for r in results:
-                severity = r.severity or "-"
-                score = f"{r.cvss_score:.1f}" if r.cvss_score is not None else "-"
-                summary = r.summary[:160] + ("..." if len(r.summary) > 160 else "")
-                log.write(f"  [bold]{r.cve_id}[/] severity={severity} cvss={score}")
-                log.write(f"    {summary}")
-                log.write(f"    {r.url}")
+        r = self._result
+        severity = r.severity or "-"
+        score = f"{r.cvss_score:.1f}" if r.cvss_score is not None else "-"
+        body = self.query_one("#cve_detail_body", RichLog)
+        body.write(f"[bold]severity:[/] {severity}   [bold]cvss:[/] {score}")
+        body.write(f"[bold]url:[/] {r.url}")
+        body.write("")
+        body.write(r.summary)
 
     def on_button_pressed(self, event: Button.Pressed) -> None:
         if event.button.id == "close":
             self.dismiss(None)
+        elif event.button.id == "explain_ai":
+            self._open_in_chatgpt()
+
+    def _open_in_chatgpt(self) -> None:
+        r = self._result
+        label = f"{self._service}:{self._version}" if self._version else self._service
+        prompt = (
+            f"Explain {r.cve_id} (affecting {label}) in plain terms: what the vulnerability is, "
+            f"how severe it is (severity={r.severity or 'unknown'}, "
+            f"CVSS={r.cvss_score if r.cvss_score is not None else 'unknown'}), how it could be "
+            f"exploited, and how to remediate it.\n\nNVD summary: {r.summary}\n\nSource: {r.url}"
+        )
+        webbrowser.open("https://chatgpt.com/?q=" + quote(prompt))
 
 
 class ScripterApp(App):
@@ -427,6 +433,7 @@ class ScripterApp(App):
         self.run_id: int | None = None
         self.redteam_plan: AttackPlan | None = None
         self._main_screen: Screen = None  # type: ignore[assignment]  # set in on_mount
+        self._cve_detail_map: dict[object, tuple[str, str, CveResult]] = {}
         registry.ensure_builtin_tools_registered()
 
     # --- layout ------------------------------------------------------
@@ -434,7 +441,7 @@ class ScripterApp(App):
     def compose(self) -> ComposeResult:
         yield Header(show_clock=True)
         yield Static(self._status_text(), id="status")
-        with TabbedContent(initial="hosts"):
+        with TabbedContent(initial="hosts", id="main_tabs"):
             with TabPane("Hosts", id="hosts"):
                 yield DataTable(id="hosts_table", zebra_stripes=True, cursor_type="row")
             with TabPane("Services", id="services"):
@@ -443,6 +450,8 @@ class ScripterApp(App):
                 with Horizontal(id="findings_toolbar"):
                     yield Button("Look up CVEs (NVD)", id="cve_lookup_button", variant="primary")
                 yield DataTable(id="findings_table", zebra_stripes=True, cursor_type="row")
+            with TabPane("CVEs", id="cves"):
+                yield DataTable(id="cves_table", zebra_stripes=True, cursor_type="row")
             with TabPane("Red Team", id="redteam"):
                 yield DataTable(id="redteam_table", zebra_stripes=True, cursor_type="row")
         with Vertical():
@@ -466,6 +475,9 @@ class ScripterApp(App):
         self._main_screen.query_one("#findings_table", DataTable).add_columns(
             "#", "Score", "Host:Port", "Signature", "CVE", "Severity", "Status"
         )
+        self._main_screen.query_one("#cves_table", DataTable).add_columns(
+            "Service", "Version", "CVE", "Severity", "CVSS", "Summary"
+        )
         self._main_screen.query_one("#redteam_table", DataTable).add_columns(
             "Host:Port", "Tool", "Manual review", "Status", "Evidence/Rationale"
         )
@@ -475,7 +487,8 @@ class ScripterApp(App):
             f"[bold {_ACCENT}]scripter TUI ready[/] - scope has {len(self.cfg.scope.hosts)} host(s). "
             "s=scope  d=discover  e=enumerate  m=vuln-map  v=validate  r=report  a=run-all  "
             "p=redteam-plan  x=redteam-simulate  c=cve-lookup  q=quit  |  click a row in Services to run "
-            "red-team tools for it, or use the Findings tab's \"Look up CVEs (NVD)\" button"
+            "red-team tools for it, or use the Findings tab's \"Look up CVEs (NVD)\" button - results "
+            "land in the CVEs tab, click a row there for detail and an \"Explain with AI\" shortcut"
         )
         if not self.cfg.scope.hosts:
             self._log("[yellow]no scope configured - press s to set \\[scope] targets before running discover[/]")
@@ -487,21 +500,27 @@ class ScripterApp(App):
 
     def on_data_table_row_selected(self, event: DataTable.RowSelected) -> None:
         """Clicking (or pressing enter on) a Services row opens the
-        red-team actions screen for that one host:port:service."""
-        if event.data_table.id != "services_table":
-            return
-        host, port, service, _version, _banner = event.data_table.get_row(event.row_key)
-        self.push_screen(
-            ServiceActionsScreen(
-                host=str(host),
-                port=int(port),
-                service="" if service == "-" else str(service),
-                cfg=self.cfg,
-                run_id=self.run_id,
-                store=self.store,
-                redteam_store=self.redteam_store,
+        red-team actions screen for that one host:port:service; clicking
+        a CVEs row opens the detail screen for that one CVE hit."""
+        if event.data_table.id == "services_table":
+            host, port, service, _version, _banner = event.data_table.get_row(event.row_key)
+            self.push_screen(
+                ServiceActionsScreen(
+                    host=str(host),
+                    port=int(port),
+                    service="" if service == "-" else str(service),
+                    cfg=self.cfg,
+                    run_id=self.run_id,
+                    store=self.store,
+                    redteam_store=self.redteam_store,
+                )
             )
-        )
+        elif event.data_table.id == "cves_table":
+            detail = self._cve_detail_map.get(event.row_key)
+            if detail is None:
+                return
+            service, version, result = detail
+            self.push_screen(CveDetailScreen(service, version, result))
 
     def on_button_pressed(self, event: Button.Pressed) -> None:
         if event.button.id == "cve_lookup_button":
@@ -820,10 +839,26 @@ class ScripterApp(App):
                 grouped.append((service, version, None, str(exc)))
             if i < len(pairs) - 1:
                 time.sleep(self.cfg.intel.cve_lookup_delay_seconds)
-        self.call_from_thread(self._show_cve_results, grouped)
+        self.call_from_thread(self._apply_cve_results, grouped)
 
-    def _show_cve_results(self, grouped: list[tuple[str, str, list[CveResult] | None, str | None]]) -> None:
-        self.push_screen(CveResultsScreen(grouped))
+    def _apply_cve_results(self, grouped: list[tuple[str, str, list[CveResult] | None, str | None]]) -> None:
+        table = self._main_screen.query_one("#cves_table", DataTable)
+        table.clear()
+        self._cve_detail_map = {}
+        for service, version, results, error in grouped:
+            if error is not None:
+                table.add_row(service, version or "-", "-", "-", "-", f"[red]lookup failed: {error}[/]")
+                continue
+            if not results:
+                table.add_row(service, version or "-", "-", "-", "-", "[dim]no CVEs found[/]")
+                continue
+            for r in results:
+                severity = r.severity or "-"
+                score = f"{r.cvss_score:.1f}" if r.cvss_score is not None else "-"
+                summary = r.summary[:100] + ("..." if len(r.summary) > 100 else "")
+                row_key = table.add_row(service, version or "-", r.cve_id, severity, score, summary)
+                self._cve_detail_map[row_key] = (service, version, r)
+        self._main_screen.query_one("#main_tabs", TabbedContent).active = "cves"
         self._log(f"[green]cve-lookup complete[/]: {len(grouped)} service/version pair(s) checked")
 
     @work(thread=True, exclusive=True)
