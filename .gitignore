@@ -11,3 +11,7 @@ config/config.toml
 *.egg-info/
 dist/
 build/
+
+# packaging (.NET output)
+packaging/installer/bin/
+packaging/installer/obj/

@@ -1,0 +1,33 @@
+<Project Sdk="Microsoft.NET.Sdk">
+
+  <PropertyGroup>
+    <OutputType>WinExe</OutputType>
+    <TargetFramework>net8.0-windows</TargetFramework>
+    <UseWPF>true</UseWPF>
+    <Nullable>enable</Nullable>
+    <ImplicitUsings>enable</ImplicitUsings>
+    <AssemblyName>Setup</AssemblyName>
+    <RootNamespace>ScripterSetup</RootNamespace>
+    <ApplicationIcon>..\assets\icon.ico</ApplicationIcon>
+    <Version>0.0.0</Version>
+
+    <!-- self-contained single-file exe -->
+    <RuntimeIdentifier>win-x64</RuntimeIdentifier>
+    <SelfContained>true</SelfContained>
+    <PublishSingleFile>true</PublishSingleFile>
+    <IncludeNativeLibrariesForSelfExtract>true</IncludeNativeLibrariesForSelfExtract>
+    <EnableCompressionInSingleFile>true</EnableCompressionInSingleFile>
+    <DebugType>none</DebugType>
+    <SatelliteResourceLanguages>en</SatelliteResourceLanguages>
+
+    <!-- set by build-installer.ps1 -->
+    <PayloadPath Condition="'$(PayloadPath)' == ''">..\..\build\payload.zip</PayloadPath>
+  </PropertyGroup>
+
+  <ItemGroup>
+    <EmbeddedResource Include="$(PayloadPath)" LogicalName="payload.zip" />
+    <Resource Include="..\assets\logo.png" Link="logo.png" />
+    <Resource Include="..\assets\icon.ico" Link="icon.ico" />
+  </ItemGroup>
+
+</Project>

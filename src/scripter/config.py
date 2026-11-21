@@ -41,6 +41,7 @@ class ScanConfig:
     timeout_seconds: float
     max_concurrency: int
     use_nmap: bool
+    deep_scan_timeout_seconds: float
 
 
 @dataclasses.dataclass(frozen=True)
@@ -184,6 +185,7 @@ def load_config(path: Path, *, allow_empty_scope: bool = False) -> Config:
         timeout_seconds=float(scan_section.get("timeout_seconds", 2.0)),
         max_concurrency=_require_int(scan_section.get("max_concurrency", 50), "scan.max_concurrency", minimum=1),
         use_nmap=bool(scan_section.get("use_nmap", False)),
+        deep_scan_timeout_seconds=float(scan_section.get("deep_scan_timeout_seconds", 900.0)),
     )
 
     validate_section = raw.get("validate", {})

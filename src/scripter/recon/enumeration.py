@@ -17,7 +17,7 @@ import ssl
 import subprocess
 
 from scripter.logging_setup import get_logger
-from scripter.models import ServiceFinding
+from scripter.models import Host, ServiceFinding
 from scripter.scope import Scope, require_in_scope
 
 log = get_logger("enumeration")
@@ -165,3 +165,104 @@ def run_nmap_version_scan(
     if proc.returncode != 0 and not proc.stdout.strip():
         return {"status": "error", "output": proc.stdout, "error": proc.stderr.strip() or f"nmap exited {proc.returncode}"}
     return {"status": "done", "output": proc.stdout, "error": proc.stderr.strip()}
+
+
+#: Matches an nmap port-table line, e.g. ``80/tcp   open  http    Apache
+#: httpd 2.4.52`` or ``443/tcp  filtered  https``. Deliberately anchored so
+#: it never matches indented NSE script-result lines (those start with
+#: ``|`` or ``|_``), only the PORT/STATE/SERVICE/VERSION table itself.
+_NMAP_PORT_LINE_RE = re.compile(
+    r"^(?P<port>\d{1,5})/tcp\s+"
+    r"(?P<state>open\|filtered|closed\|filtered|open|closed|filtered|unfiltered)\s+"
+    r"(?P<service>\S+)(?:\s+(?P<version>.*))?$"
+)
+
+
+def parse_nmap_output(output: str) -> list[tuple[int, str, str | None, str]]:
+    """Pure, network-free parsing of ``nmap -sV -sC -p-`` text output into
+    ``(port, state, service, version)`` tuples - one per line of the
+    PORT/STATE/SERVICE/VERSION table. ``closed`` ports are dropped (nmap
+    already summarizes those in a "Not shown" line); every other state
+    (``open``, ``filtered``, ``open|filtered``, ``unfiltered``) is kept so
+    firewalled/filtered services remain visible to the caller."""
+    results: list[tuple[int, str, str | None, str]] = []
+    for line in output.splitlines():
+        match = _NMAP_PORT_LINE_RE.match(line.strip())
+        if not match:
+            continue
+        state = match.group("state")
+        if state == "closed":
+            continue
+        port = int(match.group("port"))
+        service = match.group("service")
+        version = (match.group("version") or "").strip()
+        results.append((port, state, None if service == "unknown" else service, version))
+    return results
+
+
+def run_nmap_full_scan(host: str, scope: Scope, timeout_seconds: float = 900.0) -> dict:
+    """Full-port ``nmap`` sweep for the TUI's deep-scan action (Shift+D):
+    ``-p-`` (all 65535 ports, not nmap's default top-1000), ``-Pn`` (skip
+    host-discovery/ping so a host that drops ICMP isn't skipped entirely),
+    ``-sV`` (service/version detection) and ``-sC`` (nmap's curated
+    *default* NSE script set - banner/info/discovery scripts such as
+    ``http-title``/``ssl-cert``; the *intrusive*, *exploit*, *brute* and
+    *dos* categories are separate opt-in categories nmap does not run under
+    ``-sC`` and this adapter never requests).
+
+    Same safety properties as ``run_nmap_version_scan`` above: argument
+    list (no ``shell=True``), the host is scope-checked and validated
+    against ``_HOST_RE`` before it ever reaches nmap's argv, and no
+    ``-sS``/raw-socket scanning or privilege escalation is used."""
+    require_in_scope(host, scope)
+    if not _HOST_RE.match(host):
+        return {"status": "error", "output": "", "error": f"refusing to scan - '{host}' isn't a valid target"}
+    if not nmap_available():
+        return {"status": "unsupported", "output": "", "error": "nmap not found on PATH"}
+
+    args = ["nmap", "-Pn", "-sV", "-sC", "-p-", host]
+    try:
+        proc = subprocess.run(args, capture_output=True, text=True, timeout=timeout_seconds)
+    except subprocess.TimeoutExpired:
+        return {"status": "error", "output": "", "error": f"nmap timed out after {timeout_seconds}s"}
+    except (FileNotFoundError, OSError) as exc:
+        return {"status": "error", "output": "", "error": f"could not run nmap: {exc}"}
+
+    if proc.returncode != 0 and not proc.stdout.strip():
+        return {"status": "error", "output": proc.stdout, "error": proc.stderr.strip() or f"nmap exited {proc.returncode}"}
+    return {"status": "done", "output": proc.stdout, "error": proc.stderr.strip()}
+
+
+def deep_scan_hosts(scope: Scope, timeout_seconds: float = 900.0) -> tuple[list[Host], list[ServiceFinding]]:
+    """Per-host ``nmap -Pn -sV -sC -p-`` sweep across every host in
+    ``scope`` - the full-port, firewall-aware counterpart to running
+    ``discovery.discover_hosts`` followed by ``enumerate_services``.
+    Returns the same ``(hosts, findings)`` shape those two produce
+    together, built from nmap's own detection instead of a bounded TCP
+    connect sweep + banner grab, so ports nmap reports as ``filtered``/
+    ``open|filtered`` show up as findings too instead of being silently
+    skipped for not answering a plain connect."""
+    now = dt.datetime.now(dt.timezone.utc)
+    hosts: list[Host] = []
+    findings: list[ServiceFinding] = []
+    for host in scope.hosts:
+        require_in_scope(host, scope)
+        result = run_nmap_full_scan(host, scope, timeout_seconds=timeout_seconds)
+        if result["status"] != "done":
+            log.warning("deep scan for %s: %s - %s", host, result["status"], result.get("error", ""))
+            continue
+        ports = parse_nmap_output(result["output"])
+        if not ports:
+            continue
+        open_ports = tuple(sorted(p for p, state, _, _ in ports if state == "open"))
+        hosts.append(Host(ip=host, discovered_at=now, open_ports=open_ports))
+        for port, state, service, version in ports:
+            banner = version if state == "open" else f"[{state}] {version}".strip()
+            findings.append(
+                ServiceFinding(
+                    host=host, port=port, protocol="tcp", service=service,
+                    version=version or None, banner=banner, discovered_at=now,
+                )
+            )
+    hosts.sort(key=lambda h: h.ip)
+    return hosts, findings

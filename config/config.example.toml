@@ -38,6 +38,10 @@ max_concurrency = 50
 # Optional richer version detection via `nmap -sV` (read-only; no NSE
 # vuln/exploit scripts, no raw-socket scanning). Requires nmap on PATH.
 use_nmap = false
+# Timeout for the TUI's deep-scan action (Shift+D): `nmap -Pn -sV -sC -p-`
+# against every scope host. Full 65535-port + default-script sweeps are
+# slow, so this is far more generous than [scan] timeout_seconds above.
+deep_scan_timeout_seconds = 900.0
 
 [validate]
 # Opt-in gate for the non-destructive validation checks in

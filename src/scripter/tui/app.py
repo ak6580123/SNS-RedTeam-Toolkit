@@ -19,6 +19,7 @@ import datetime as dt
 import time
 import webbrowser
 from pathlib import Path
+from typing import TYPE_CHECKING
 from urllib.parse import quote
 
 from textual import work
@@ -26,49 +27,112 @@ from textual.app import App, ComposeResult
 from textual.binding import Binding
 from textual.containers import Horizontal, Vertical
 from textual.screen import ModalScreen, Screen
+from textual.theme import Theme
 from textual.widgets import Button, DataTable, Footer, Header, Input, Label, RichLog, Static, TabbedContent, TabPane
 
-from scripter.config import Config, write_scope_targets
-from scripter.intel.cve_lookup import CveLookupError, CveResult, lookup_cves
-from scripter.intel.matcher import match_findings
-from scripter.intel.vuln_db import load_signatures
-from scripter.models import Host, MatchStatus, ServiceFinding, Severity, VulnMatch
-from scripter.prioritize import prioritize as prioritize_matches
-from scripter.recon.discovery import discover_hosts
-from scripter.recon.enumeration import enumerate_services
-from scripter.redteam import registry
-from scripter.redteam.executor import execute_item
-from scripter.redteam.models import AttackPlan, AttackPlanItem, ExecutionStatus, ToolResult
-from scripter.redteam.planner import build_plan
+# Only the lightweight, always-needed pieces load at import time. Everything
+# in the discover->report pipeline (executor, cve_lookup, enumeration,
+# validation, reporting, ...) is imported inside the worker method that
+# uses it - those methods already run on a background thread, so the
+# import cost lands there instead of delaying the dashboard's first paint.
+from scripter.config import write_scope_targets
+from scripter.models import MatchStatus, Severity
+from scripter.redteam.models import ExecutionStatus
 from scripter.redteam.storage import RedTeamStore
-from scripter.reporting.report import write_csv, write_html, write_json
+# Scope is referenced at runtime in a class base (ModalScreen[Scope | None]),
+# which is evaluated at class-definition time, so it must be a real import.
 from scripter.scope import Scope, ScopeError, parse_scope
 from scripter.storage.db import Store
-from scripter.validation.checks import run_validation
+
+if TYPE_CHECKING:  # annotation-only names - never imported at runtime
+    from scripter.config import Config
+    from scripter.intel.cve_lookup import CveResult
+    from scripter.models import Host, ServiceFinding, VulnMatch
+    from scripter.redteam.models import AttackPlan, ToolResult
+
+# --- palette ---------------------------------------------------------
+# A single refined dark palette drives both the Textual theme (widget
+# chrome, via the design tokens below) and the inline Rich markup we
+# write into tables/logs (the hex constants here). Keeping them in one
+# place is what stops the UI drifting into the old neon-green terminal
+# look - everything now reads as one quiet, cohesive surface.
+_ACCENT = "#9ece6a"   # muted green - the one accent
+_BLUE = "#7aa2f7"
+_MUTED = "#565f7e"
+_WARN = "#e0af68"
+_ERR = "#f7768e"
 
 _REDTEAM_STATUS_STYLE: dict[ExecutionStatus, str] = {
-    ExecutionStatus.COMPLETED: "bold green",
-    ExecutionStatus.SIMULATED: "yellow",
+    ExecutionStatus.COMPLETED: f"bold {_ACCENT}",
+    ExecutionStatus.SIMULATED: _WARN,
     ExecutionStatus.BLOCKED: "dim strike",
-    ExecutionStatus.FAILED: "bold red",
-    ExecutionStatus.INCONCLUSIVE: "grey58",
+    ExecutionStatus.FAILED: f"bold {_ERR}",
+    ExecutionStatus.INCONCLUSIVE: _MUTED,
 }
 
 _SEVERITY_STYLE: dict[Severity, str] = {
-    Severity.CRITICAL: "bold white on red",
-    Severity.HIGH: "bold red",
-    Severity.MEDIUM: "bold yellow",
-    Severity.LOW: "bold green",
+    Severity.CRITICAL: f"bold #0b0d12 on {_ERR}",
+    Severity.HIGH: f"bold {_ERR}",
+    Severity.MEDIUM: f"bold {_WARN}",
+    Severity.LOW: f"bold {_ACCENT}",
 }
 
 _STATUS_STYLE: dict[MatchStatus, str] = {
-    MatchStatus.CONFIRMED: "bold green",
-    MatchStatus.HYPOTHESIS: "yellow",
-    MatchStatus.INCONCLUSIVE: "grey58",
+    MatchStatus.CONFIRMED: f"bold {_ACCENT}",
+    MatchStatus.HYPOTHESIS: _WARN,
+    MatchStatus.INCONCLUSIVE: _MUTED,
     MatchStatus.RULED_OUT: "dim strike",
 }
 
-_ACCENT = "#39ff88"
+#: Registered on the app at mount; a Tokyo-Night-leaning dark theme that
+#: gives the whole dashboard the quiet, low-contrast-but-legible feel of
+#: a modern editor TUI rather than a high-vis hacker console.
+SCRIPTER_THEME = Theme(
+    name="scripter",
+    primary=_ACCENT,
+    secondary=_BLUE,
+    accent=_ACCENT,
+    foreground="#c0caf5",
+    background="#0b0d12",
+    surface="#12151c",
+    panel="#161a22",
+    success=_ACCENT,
+    warning=_WARN,
+    error=_ERR,
+    dark=True,
+    variables={
+        "border": "#232838",
+        "border-blurred": "#1b1f2a",
+        "text-muted": _MUTED,
+        "block-cursor-foreground": "#0b0d12",
+        "block-cursor-background": _ACCENT,
+        "block-cursor-text-style": "bold",
+        "footer-key-foreground": _ACCENT,
+        "footer-description-foreground": "#8089b3",
+        "footer-background": "#0b0d12",
+        "scrollbar": "#232838",
+        "scrollbar-hover": "#2d3344",
+        "scrollbar-active": _ACCENT,
+        "input-selection-background": "#9ece6a40",
+    },
+)
+
+#: Full keymap, shown by the `?` overlay so the footer can stay short.
+_HELP_TEXT = (
+    f"[b {_ACCENT}]RECON PIPELINE[/]\n"
+    f"  [b]d[/] discover        [b]D[/] deep-scan (nmap -p-)\n"
+    f"  [b]e[/] enumerate       [b]m[/] vuln-map\n"
+    f"  [b]v[/] validate        [b]r[/] report\n"
+    f"  [b]a[/] run-all (discover -> report)\n\n"
+    f"[b {_ACCENT}]RED TEAM[/]\n"
+    f"  [b]p[/] plan            [b]x[/] simulate\n"
+    f"  [b]c[/] cve-lookup (NVD)\n\n"
+    f"[b {_ACCENT}]GENERAL[/]\n"
+    f"  [b]s[/] edit scope      [b]?[/] this help\n"
+    f"  [b]q[/] quit\n\n"
+    f"[{_MUTED}]Click a Services row to run a tool against that host.\n"
+    f"Click a CVEs row for detail and an \"Explain with AI\" shortcut.[/]"
+)
 
 #: service (as recorded on ServiceFinding) -> red-team tool(s) worth
 #: offering first when a user clicks that service in the TUI. Broader
@@ -104,30 +168,33 @@ class ScopeEditorScreen(ModalScreen[Scope | None]):
     the CLI's config loader.
     """
 
-    CSS = f"""
-    ScopeEditorScreen {{
+    CSS = """
+    ScopeEditorScreen {
         align: center middle;
-    }}
-    #scope_dialog {{
+    }
+    #scope_dialog {
         width: 76;
         height: auto;
-        border: round {_ACCENT};
-        background: #0a0e0b;
+        border: round $primary;
+        background: $surface;
         padding: 1 2;
-    }}
-    #scope_dialog Label {{
-        color: {_ACCENT};
-    }}
-    #scope_error {{
-        color: #ff5f5f;
+    }
+    #scope_dialog Label {
+        color: $primary;
+    }
+    #scope_error {
+        color: $error;
         height: auto;
         margin-top: 1;
-    }}
-    #scope_buttons {{
+    }
+    #scope_buttons {
         height: auto;
         margin-top: 1;
         align: right middle;
-    }}
+    }
+    #scope_buttons Button {
+        margin-left: 1;
+    }
     """
 
     def __init__(self, current_targets: tuple[str, ...], allow_public: bool, max_hosts: int):
@@ -179,42 +246,44 @@ class ServiceActionsScreen(ModalScreen[None]):
     of silently doing nothing.
     """
 
-    CSS = f"""
-    ServiceActionsScreen {{
+    CSS = """
+    ServiceActionsScreen {
         align: center middle;
-    }}
-    #actions_dialog {{
+    }
+    #actions_dialog {
         width: 92;
         height: auto;
         max-height: 90%;
-        border: round {_ACCENT};
-        background: #0a0e0b;
+        border: round $primary;
+        background: $surface;
         padding: 1 2;
-    }}
-    #actions_dialog Label {{
-        color: {_ACCENT};
-    }}
-    #actions_target {{
+    }
+    #actions_dialog Label {
+        color: $text-muted;
+    }
+    #actions_target {
+        color: $primary;
         text-style: bold;
-    }}
-    #actions_tools {{
+    }
+    #actions_tools {
         height: auto;
         margin-top: 1;
         margin-bottom: 1;
-    }}
-    #actions_tools Button {{
+    }
+    #actions_tools Button {
         margin-right: 1;
         margin-bottom: 1;
-    }}
-    #actions_log {{
-        border: round {_ACCENT};
+    }
+    #actions_log {
+        border: round $border;
+        background: $panel;
         height: 10;
-        color: #7cfc9b;
-    }}
-    #actions_close {{
+        color: $foreground;
+    }
+    #actions_close {
         margin-top: 1;
         align: right middle;
-    }}
+    }
     """
 
     def __init__(
@@ -264,6 +333,11 @@ class ServiceActionsScreen(ModalScreen[None]):
 
     @work(thread=True, exclusive=False)
     def _execute(self, tool_name: str) -> None:
+        from scripter.redteam import registry
+        from scripter.redteam.executor import execute_item
+        from scripter.redteam.models import AttackPlanItem
+
+        registry.ensure_builtin_tools_registered()
         item = AttackPlanItem(
             host=self._host, port=self._port, service=self._service or "unknown", signature_id="tui-adhoc",
             tool_name=tool_name, rationale="launched from the TUI Services screen", prerequisites=(),
@@ -294,30 +368,34 @@ class CveDetailScreen(ModalScreen[None]):
     call from this process itself.
     """
 
-    CSS = f"""
-    CveDetailScreen {{
+    CSS = """
+    CveDetailScreen {
         align: center middle;
-    }}
-    #cve_detail_dialog {{
+    }
+    #cve_detail_dialog {
         width: 96;
         height: auto;
         max-height: 90%;
-        border: round {_ACCENT};
-        background: #0a0e0b;
+        border: round $primary;
+        background: $surface;
         padding: 1 2;
-    }}
-    #cve_detail_dialog Label {{
-        color: {_ACCENT};
-    }}
-    #cve_detail_body {{
-        border: round {_ACCENT};
+    }
+    #cve_detail_dialog Label {
+        color: $primary;
+    }
+    #cve_detail_body {
+        border: round $border;
+        background: $panel;
         height: 16;
-        color: #7cfc9b;
-    }}
-    #cve_detail_buttons {{
+        color: $foreground;
+    }
+    #cve_detail_buttons {
         margin-top: 1;
         align: right middle;
-    }}
+    }
+    #cve_detail_buttons Button {
+        margin-left: 1;
+    }
     """
 
     def __init__(self, service: str, version: str, result: CveResult):
@@ -363,64 +441,134 @@ class CveDetailScreen(ModalScreen[None]):
         webbrowser.open("https://chatgpt.com/?q=" + quote(prompt))
 
 
+class HelpScreen(ModalScreen[None]):
+    """The full keymap, on `?`. Keeps the footer short by giving the
+    less-central bindings a home instead of crowding the status bar."""
+
+    CSS = """
+    HelpScreen {
+        align: center middle;
+    }
+    #help_dialog {
+        width: 60;
+        height: auto;
+        max-height: 90%;
+        border: round $primary;
+        background: $surface;
+        padding: 1 2;
+    }
+    #help_title {
+        color: $primary;
+        text-style: bold;
+        margin-bottom: 1;
+    }
+    #help_hint {
+        color: $text-muted;
+        margin-top: 1;
+    }
+    """
+
+    BINDINGS = [Binding("escape,q,question_mark", "dismiss", "Close")]
+
+    def compose(self) -> ComposeResult:
+        with Vertical(id="help_dialog"):
+            yield Static("SCRIPTER · keymap", id="help_title")
+            yield Static(_HELP_TEXT, id="help_body")
+            yield Static("esc to close", id="help_hint")
+
+
 class ScripterApp(App):
     """Launch with ``scripter tui``. See docs/architecture.md for how this
     maps onto the same pipeline the CLI uses, stage by stage."""
 
-    TITLE = "SCRIPTER // RED TEAM"
+    TITLE = "SCRIPTER"
+    SUB_TITLE = "red-team automation"
 
-    CSS = f"""
-    Screen {{
-        background: #0a0e0b;
-    }}
-    #status {{
-        height: 3;
-        border: round {_ACCENT};
-        padding: 0 1;
-        color: {_ACCENT};
+    CSS = """
+    Screen {
+        background: $background;
+        color: $foreground;
+    }
+
+    Header {
+        background: $background;
+        color: $primary;
         text-style: bold;
-    }}
-    DataTable {{
-        border: round {_ACCENT};
+    }
+
+    /* A single quiet status line instead of a boxed, bold banner. */
+    #status {
+        height: 1;
+        padding: 0 2;
+        background: $background;
+        color: $text-muted;
+    }
+
+    TabbedContent {
         height: 1fr;
-    }}
-    #findings_toolbar {{
-        height: auto;
-        margin-bottom: 1;
-    }}
-    RichLog {{
-        border: round {_ACCENT};
-        height: 12;
-        color: #7cfc9b;
-    }}
-    Tabs {{
-        background: #0a0e0b;
-    }}
-    Tab {{
-        color: {_ACCENT};
-    }}
-    Footer {{
-        background: #0a0e0b;
-    }}
-    Header {{
-        background: #0a0e0b;
-        color: {_ACCENT};
+    }
+    Tabs {
+        background: $background;
+    }
+    Tab {
+        color: $text-muted;
+        padding: 0 2;
+    }
+
+    /* Subtle bordered surfaces - no more neon outlines on every widget. */
+    DataTable {
+        background: $surface;
+        color: $foreground;
+        border: round $border;
+        height: 1fr;
+        scrollbar-size-vertical: 1;
+    }
+    DataTable:focus {
+        border: round $primary;
+    }
+    DataTable > .datatable--header {
+        background: $surface;
+        color: $primary;
         text-style: bold;
-    }}
+    }
+    DataTable > .datatable--cursor {
+        background: $primary;
+        color: $background;
+        text-style: bold;
+    }
+
+    #log {
+        height: 9;
+        border: round $border;
+        background: $surface;
+        color: $foreground;
+        padding: 0 1;
+    }
+
+    Footer {
+        background: $background;
+    }
     """
 
+    # The footer deliberately shows only the five anchors - scope (setup),
+    # run-all (the whole pipeline in one key), CVE lookup, help and quit.
+    # The granular stage keys and the red-team actions still work; they're
+    # kept out of the footer (show=False) and listed in the `?` overlay so
+    # the status bar stays calm instead of spelling out a dozen shortcuts.
     BINDINGS = [
         Binding("s", "edit_scope", "Scope"),
-        Binding("d", "run_discover", "Discover"),
-        Binding("e", "run_enumerate", "Enumerate"),
-        Binding("m", "run_vuln_map", "Vuln-map"),
-        Binding("v", "run_validate", "Validate"),
-        Binding("r", "run_report", "Report"),
         Binding("a", "run_all", "Run-all"),
-        Binding("p", "redteam_plan", "RT-plan"),
-        Binding("x", "redteam_simulate", "RT-simulate"),
-        Binding("c", "cve_lookup", "CVE-lookup"),
+        Binding("c", "cve_lookup", "CVEs"),
+        Binding("question_mark", "show_help", "Help", key_display="?"),
         Binding("q", "quit", "Quit"),
+        Binding("d", "run_discover", "Discover", show=False),
+        Binding("D", "run_discover_deep", "Deep-scan", show=False),
+        Binding("e", "run_enumerate", "Enumerate", show=False),
+        Binding("m", "run_vuln_map", "Vuln-map", show=False),
+        Binding("v", "run_validate", "Validate", show=False),
+        Binding("r", "run_report", "Report", show=False),
+        Binding("p", "redteam_plan", "Plan", show=False),
+        Binding("x", "redteam_simulate", "Simulate", show=False),
     ]
 
     def __init__(self, cfg: Config, config_path: Path):
@@ -429,17 +577,37 @@ class ScripterApp(App):
         self.config_path = config_path
         self.store = Store(cfg.storage.db_path)
         self.redteam_store = RedTeamStore(self.store)
-        self.signatures = load_signatures()
+        self._signatures: object | None = None  # loaded on first use via .signatures
+        self._tools_registered = False
         self.run_id: int | None = None
         self.redteam_plan: AttackPlan | None = None
         self._main_screen: Screen = None  # type: ignore[assignment]  # set in on_mount
         self._cve_detail_map: dict[object, tuple[str, str, CveResult]] = {}
-        registry.ensure_builtin_tools_registered()
+
+    @property
+    def signatures(self):
+        """Offline signature dataset, parsed on first access (vuln-map /
+        validate / plan) rather than in __init__ - keeps the TUI's cold
+        start off the critical path to first paint."""
+        if self._signatures is None:
+            from scripter.intel.vuln_db import load_signatures
+
+            self._signatures = load_signatures()
+        return self._signatures
+
+    def _ensure_tools(self) -> None:
+        """Register the built-in red-team tools once, lazily. Pulls in the
+        heavy executor/tool modules only when a tool actually runs."""
+        if not self._tools_registered:
+            from scripter.redteam import registry
+
+            registry.ensure_builtin_tools_registered()
+            self._tools_registered = True
 
     # --- layout ------------------------------------------------------
 
     def compose(self) -> ComposeResult:
-        yield Header(show_clock=True)
+        yield Header(show_clock=False)
         yield Static(self._status_text(), id="status")
         with TabbedContent(initial="hosts", id="main_tabs"):
             with TabPane("Hosts", id="hosts"):
@@ -447,8 +615,6 @@ class ScripterApp(App):
             with TabPane("Services", id="services"):
                 yield DataTable(id="services_table", zebra_stripes=True, cursor_type="row")
             with TabPane("Findings", id="findings"):
-                with Horizontal(id="findings_toolbar"):
-                    yield Button("Look up CVEs (NVD)", id="cve_lookup_button", variant="primary")
                 yield DataTable(id="findings_table", zebra_stripes=True, cursor_type="row")
             with TabPane("CVEs", id="cves"):
                 yield DataTable(id="cves_table", zebra_stripes=True, cursor_type="row")
@@ -459,6 +625,10 @@ class ScripterApp(App):
         yield Footer()
 
     def on_mount(self) -> None:
+        # Register and switch to the Scripter theme first, so the very
+        # first paint is already in the right palette (no neon flash).
+        self.register_theme(SCRIPTER_THEME)
+        self.theme = "scripter"
         # Captured once, while this dashboard screen is still the only one
         # on the stack. ServiceActionsScreen (and any other screen we push
         # later) sits *on top* of it - and App.query_one only ever searches
@@ -484,16 +654,15 @@ class ScripterApp(App):
         self.run_id = self.store.latest_run_id()
         self._refresh_status()
         self._log(
-            f"[bold {_ACCENT}]scripter TUI ready[/] - scope has {len(self.cfg.scope.hosts)} host(s). "
-            "s=scope  d=discover  e=enumerate  m=vuln-map  v=validate  r=report  a=run-all  "
-            "p=redteam-plan  x=redteam-simulate  c=cve-lookup  q=quit  |  click a row in Services to run "
-            "red-team tools for it, or use the Findings tab's \"Look up CVEs (NVD)\" button - results "
-            "land in the CVEs tab, click a row there for detail and an \"Explain with AI\" shortcut"
+            f"[bold {_ACCENT}]scripter[/] ready  ·  scope: {len(self.cfg.scope.hosts)} host(s)  ·  "
+            f"press [bold {_ACCENT}]?[/] for the keymap"
         )
         if not self.cfg.scope.hosts:
-            self._log("[yellow]no scope configured - press s to set \\[scope] targets before running discover[/]")
+            self._log(f"[{_WARN}]no scope set - press [b]s[/] to set \\[scope] targets before running discover[/]")
+        # Paint the shell first, then pull any prior run's rows in on the
+        # next frame - a populated database no longer blocks first paint.
         if self.run_id is not None:
-            self._load_existing_run()
+            self.call_after_refresh(self._load_existing_run)
 
     def on_unmount(self) -> None:
         self.store.close()
@@ -521,10 +690,6 @@ class ScripterApp(App):
                 return
             service, version, result = detail
             self.push_screen(CveDetailScreen(service, version, result))
-
-    def on_button_pressed(self, event: Button.Pressed) -> None:
-        if event.button.id == "cve_lookup_button":
-            self.action_cve_lookup()
 
     def refresh_redteam_results(self) -> None:
         """Re-pull this run's saved redteam results into the Red Team
@@ -585,6 +750,8 @@ class ScripterApp(App):
             self._log(f"[green]enumerate complete[/]: {len(findings)} service(s)")
 
     def _apply_findings(self, matches: list[VulnMatch], log: bool = True) -> None:
+        from scripter.prioritize import prioritize as prioritize_matches
+
         ranked = prioritize_matches(matches)
         table = self._main_screen.query_one("#findings_table", DataTable)
         table.clear()
@@ -633,12 +800,29 @@ class ScripterApp(App):
     # --- pure pipeline steps (no UI access - safe to call off-thread) -
 
     def _do_discover(self) -> tuple[int, list[Host]]:
+        from scripter.recon.discovery import discover_hosts
+
         run_id = self.store.start_run(str(self.config_path))
         hosts = discover_hosts(self.cfg.scope, self.cfg.scan.ports, self.cfg.scan.timeout_seconds, self.cfg.scan.max_concurrency)
         self.store.save_hosts(run_id, hosts)
         return run_id, hosts
 
+    def _do_discover_deep(self) -> tuple[int, list[Host], list[ServiceFinding]]:
+        """Full-port nmap sweep (``-Pn -sV -sC -p-``) in one pass: unlike
+        ``_do_discover`` + ``_do_enumerate``, this starts a fresh run and
+        populates both Hosts and Services directly from nmap's own
+        detection, so filtered/firewalled ports show up too."""
+        from scripter.recon.enumeration import deep_scan_hosts
+
+        run_id = self.store.start_run(str(self.config_path))
+        hosts, findings = deep_scan_hosts(self.cfg.scope, self.cfg.scan.deep_scan_timeout_seconds)
+        self.store.save_hosts(run_id, hosts)
+        self.store.save_services(run_id, findings)
+        return run_id, hosts, findings
+
     def _do_enumerate(self, run_id: int) -> list[ServiceFinding]:
+        from scripter.recon.enumeration import enumerate_services
+
         hosts = self.store.load_hosts(run_id)
         hosts_with_ports = {h.ip: h.open_ports for h in hosts}
         findings = enumerate_services(self.cfg.scope, hosts_with_ports, self.cfg.scan.timeout_seconds)
@@ -646,6 +830,8 @@ class ScripterApp(App):
         return findings
 
     def _do_vuln_map(self, run_id: int) -> list[VulnMatch]:
+        from scripter.intel.matcher import match_findings
+
         findings = self.store.load_services(run_id)
         matches = match_findings(findings, self.signatures)
         self.store.clear_matches_for_run(run_id)
@@ -653,6 +839,8 @@ class ScripterApp(App):
         return matches
 
     def _do_validate(self, run_id: int) -> list[VulnMatch]:
+        from scripter.validation.checks import run_validation
+
         matches = self.store.load_matches(run_id)
         signature_checks = {s.id: s.check for s in self.signatures if s.check}
         updated = run_validation(matches, signature_checks, self.cfg.scope, self.cfg.validate.timeout_seconds)
@@ -661,17 +849,26 @@ class ScripterApp(App):
         return updated
 
     def _do_redteam_plan(self, run_id: int) -> AttackPlan:
+        from scripter.redteam.planner import build_plan
+
+        self._ensure_tools()
         matches = self.store.load_matches(run_id)
         plan = build_plan(run_id, matches, self.signatures, self.cfg.scope)
         self.redteam_store.save_plan(plan)
         return plan
 
     def _do_redteam_simulate(self, plan: AttackPlan) -> list[ToolResult]:
+        from scripter.redteam.executor import execute_item
+
+        self._ensure_tools()
         results = [execute_item(item, self.cfg, simulate_only=True, run_id=plan.run_id) for item in plan.items]
         self.redteam_store.save_results(results)
         return results
 
     def _do_report(self, run_id: int) -> list[Path]:
+        from scripter.prioritize import prioritize as prioritize_matches
+        from scripter.reporting.report import write_csv, write_html, write_json
+
         matches = self.store.load_matches(run_id)
         ranked = prioritize_matches(matches)
         reports_dir = self.cfg.storage.reports_dir
@@ -684,6 +881,9 @@ class ScripterApp(App):
         ]
 
     # --- actions (keybindings) ----------------------------------------
+
+    def action_show_help(self) -> None:
+        self.push_screen(HelpScreen())
 
     def action_edit_scope(self) -> None:
         self.push_screen(
@@ -704,6 +904,17 @@ class ScripterApp(App):
             self._log("[red]no scope configured - press s to set \\[scope] targets[/]")
             return
         self.worker_discover()
+
+    def action_run_discover_deep(self) -> None:
+        from scripter.recon.enumeration import nmap_available
+
+        if not self.cfg.scope.hosts:
+            self._log("[red]no scope configured - press s to set \\[scope] targets[/]")
+            return
+        if not nmap_available():
+            self._log("[red]nmap not found on PATH - deep-scan (-p-) needs nmap installed[/]")
+            return
+        self.worker_discover_deep()
 
     def action_run_enumerate(self) -> None:
         if self.run_id is None:
@@ -777,6 +988,16 @@ class ScripterApp(App):
         self.call_from_thread(self._apply_discover, run_id, hosts)
 
     @work(thread=True, exclusive=True)
+    def worker_discover_deep(self) -> None:
+        self.call_from_thread(
+            self._log,
+            "[cyan]deep-scan: nmap -Pn -sV -sC -p- across scope (all 65535 ports/host - this can take a while)...[/]",
+        )
+        run_id, hosts, findings = self._do_discover_deep()
+        self.call_from_thread(self._apply_discover, run_id, hosts)
+        self.call_from_thread(self._apply_enumerate, findings)
+
+    @work(thread=True, exclusive=True)
     def worker_enumerate(self) -> None:
         assert self.run_id is not None
         self.call_from_thread(self._log, "[cyan]enumerate: grabbing banners...[/]")
@@ -820,6 +1041,8 @@ class ScripterApp(App):
 
     @work(thread=True, exclusive=False)
     def worker_cve_lookup(self, services: list[ServiceFinding]) -> None:
+        from scripter.intel.cve_lookup import CveLookupError, lookup_cves
+
         pairs = sorted({(s.service, s.version or "") for s in services if s.service})
         pairs = pairs[: self.cfg.intel.cve_lookup_max_pairs]
         self.call_from_thread(

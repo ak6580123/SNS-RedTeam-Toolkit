@@ -11,7 +11,7 @@ from __future__ import annotations
 import datetime as dt
 import time
 from pathlib import Path
-from typing import Optional
+from typing import TYPE_CHECKING, Optional
 
 import typer
 from rich.console import Console
@@ -20,34 +20,26 @@ from rich.table import Table
 
 from scripter import __version__
 from scripter.config import Config, ConfigError, load_config
-from scripter.intel.cve_lookup import CveLookupError, lookup_cves
-from scripter.intel.matcher import match_findings
-from scripter.intel.vuln_db import SignatureError, load_signatures
 from scripter.logging_setup import configure_logging, get_logger
-from scripter.models import MatchStatus
-from scripter.prioritize import prioritize as prioritize_matches
-from scripter.recon.discovery import discover_hosts
-from scripter.recon.enumeration import enumerate_services, nmap_available, run_nmap_version_scan
-from scripter.redteam import registry
-from scripter.redteam.executor import execute_item
-from scripter.redteam.models import AttackPlanItem, ExecutionStatus
-from scripter.redteam.planner import build_plan
-from scripter.redteam.storage import RedTeamStore
-from scripter.reporting.report import (
-    write_csv,
-    write_html,
-    write_json,
-    write_redteam_csv,
-    write_redteam_html,
-    write_redteam_json,
-)
-from scripter.scope import ScopeError, require_in_scope
-from scripter.storage.db import Store
-from scripter.validation.checks import run_validation
 
-app = typer.Typer(help="Authorized red-team recon/enumeration/vuln-mapping toolkit for A/D CTF competitions.")
+if TYPE_CHECKING:  # annotation-only; keeps module import light at runtime
+    from scripter.redteam.models import AttackPlanItem
+
+# NOTE: everything in the discover->report pipeline (recon, intel, redteam,
+# reporting, validation, storage) is imported lazily inside the command
+# that needs it, not at module load. That keeps `scripter`, `scripter
+# --help` and `scripter doctor` fast - they never pull in urllib/http
+# (cve_lookup), the redteam executor, or the reporting writers just to
+# print a help screen.
+
+app = typer.Typer(
+    help="Authorized red-team recon/enumeration/vuln-mapping toolkit for A/D CTF competitions.",
+    no_args_is_help=True,
+    add_completion=False,
+)
 redteam_app = typer.Typer(
-    help="Offline attack planning, deterministic simulation, and bounded scope-gated audit tools."
+    help="Offline attack planning, deterministic simulation, and bounded scope-gated audit tools.",
+    no_args_is_help=True,
 )
 app.add_typer(redteam_app, name="redteam")
 console = Console()
@@ -72,6 +64,8 @@ def _stamp() -> str:
 
 
 def _write_reports(findings, reports_dir: Path, run_id: int, formats: str) -> list[Path]:
+    from scripter.reporting.report import write_csv, write_html, write_json
+
     reports_dir.mkdir(parents=True, exist_ok=True)
     stamp = _stamp()
     written: list[Path] = []
@@ -90,6 +84,8 @@ def _write_reports(findings, reports_dir: Path, run_id: int, formats: str) -> li
 
 
 def _write_redteam_reports(results, reports_dir: Path, run_id: int, formats: str) -> list[Path]:
+    from scripter.reporting.report import write_redteam_csv, write_redteam_html, write_redteam_json
+
     reports_dir.mkdir(parents=True, exist_ok=True)
     stamp = _stamp()
     written: list[Path] = []
@@ -129,6 +125,8 @@ def tui(config: Path = ConfigOption) -> None:
 @app.command()
 def doctor(config: Path = ConfigOption) -> None:
     """Report what this environment and config will actually let you do."""
+    from scripter.recon.enumeration import nmap_available
+
     console.print(f"[bold]scripter[/bold] {__version__}")
     console.print(f"nmap on PATH: {'yes' if nmap_available() else 'no'}")
     if not config.is_file():
@@ -149,6 +147,9 @@ def doctor(config: Path = ConfigOption) -> None:
 @app.command()
 def discover(config: Path = ConfigOption) -> None:
     """Sweep the configured scope for live hosts/open ports (TCP connect only, no raw sockets)."""
+    from scripter.recon.discovery import discover_hosts
+    from scripter.storage.db import Store
+
     cfg = _load(config)
     with Store(cfg.storage.db_path) as store:
         run_id = store.start_run(str(config))
@@ -172,6 +173,9 @@ def enumerate_cmd(
     use_nmap: Optional[bool] = typer.Option(None, help="Override [scan] use_nmap for this invocation."),
 ) -> None:
     """Grab banners / lightweight version info for every open port discover found."""
+    from scripter.recon.enumeration import enumerate_services, run_nmap_version_scan
+    from scripter.storage.db import Store
+
     cfg = _load(config)
     with Store(cfg.storage.db_path) as store:
         rid = run_id or store.latest_run_id()
@@ -214,6 +218,10 @@ def vuln_map(
     signatures_path: Optional[Path] = typer.Option(None, "--signatures", help="Override the bundled signature dataset."),
 ) -> None:
     """Match enumerated services against the offline vulnerability-signature dataset."""
+    from scripter.intel.matcher import match_findings
+    from scripter.intel.vuln_db import SignatureError, load_signatures
+    from scripter.storage.db import Store
+
     cfg = _load(config)
     try:
         signatures = load_signatures(signatures_path)
@@ -241,6 +249,10 @@ def validate(
     signatures_path: Optional[Path] = typer.Option(None, "--signatures", help="Override the bundled signature dataset."),
 ) -> None:
     """Run non-destructive validation checks for matches whose signature has one registered."""
+    from scripter.intel.vuln_db import SignatureError, load_signatures
+    from scripter.storage.db import Store
+    from scripter.validation.checks import run_validation
+
     cfg = _load(config)
     if not cfg.validate.enabled:
         console.print("[yellow]\\[validate] enabled = false in config - refusing to run active validation checks[/yellow]")
@@ -280,6 +292,10 @@ def report(
     ),
 ) -> None:
     """Generate ranked, machine-readable findings reports for a run."""
+    from scripter.prioritize import prioritize as prioritize_matches
+    from scripter.redteam.storage import RedTeamStore
+    from scripter.storage.db import Store
+
     cfg = _load(config)
     with Store(cfg.storage.db_path) as store:
         rid = run_id or store.latest_run_id()
@@ -320,6 +336,14 @@ def run_all(
     formats: str = typer.Option("json,csv", help="Report formats to generate at the end."),
 ) -> None:
     """Full pipeline: discover -> enumerate -> vuln-map -> (validate) -> report, in one run."""
+    from scripter.intel.matcher import match_findings
+    from scripter.intel.vuln_db import SignatureError, load_signatures
+    from scripter.prioritize import prioritize as prioritize_matches
+    from scripter.recon.discovery import discover_hosts
+    from scripter.recon.enumeration import enumerate_services
+    from scripter.storage.db import Store
+    from scripter.validation.checks import run_validation
+
     cfg = _load(config)
     try:
         signatures = load_signatures()
@@ -369,6 +393,9 @@ def cve_lookup(
     signature set to recognise still has a version string worth asking
     NVD about.
     """
+    from scripter.intel.cve_lookup import CveLookupError, lookup_cves
+    from scripter.storage.db import Store
+
     cfg = _load(config)
     if not cfg.intel.cve_lookup_enabled:
         console.print("[yellow]\\[intel] cve_lookup_enabled = false in config - refusing to query NVD[/yellow]")
@@ -429,6 +456,8 @@ def cve_lookup(
 @redteam_app.command("list-tools")
 def redteam_list_tools() -> None:
     """List every registered red-team tool. Fully offline - no config or scope required."""
+    from scripter.redteam import registry
+
     registry.ensure_builtin_tools_registered()
     table = Table(title="Red-team tool registry")
     table.add_column("Tool")
@@ -447,6 +476,12 @@ def redteam_plan(
     run_id: Optional[int] = typer.Option(None, help="Run to plan for (defaults to the latest run)."),
 ) -> None:
     """Build a deterministic attack plan from a run's vuln-map matches. Reads the database only - no network access."""
+    from scripter.intel.vuln_db import SignatureError, load_signatures
+    from scripter.redteam import registry
+    from scripter.redteam.planner import build_plan
+    from scripter.redteam.storage import RedTeamStore
+    from scripter.storage.db import Store
+
     cfg = _load(config)
     registry.ensure_builtin_tools_registered()
     try:
@@ -489,6 +524,11 @@ def redteam_simulate(
     run_id: Optional[int] = typer.Option(None, help="Run to simulate (defaults to the latest run)."),
 ) -> None:
     """Execute the saved attack plan through the deterministic offline simulator. Never touches the network."""
+    from scripter.redteam import registry
+    from scripter.redteam.executor import execute_item
+    from scripter.redteam.storage import RedTeamStore
+    from scripter.storage.db import Store
+
     cfg = _load(config, allow_empty_scope=True)
     if not cfg.redteam.simulate_enabled:
         console.print("[yellow]\\[redteam] simulate_enabled = false in config[/yellow]")
@@ -518,7 +558,10 @@ def redteam_simulate(
     console.print(table)
 
 
-def _adhoc_item(host: str, port: int, service: str, tool_name: str) -> AttackPlanItem:
+def _adhoc_item(host: str, port: int, service: str, tool_name: str) -> "AttackPlanItem":
+    from scripter.models import MatchStatus
+    from scripter.redteam.models import AttackPlanItem
+
     return AttackPlanItem(
         host=host, port=port, service=service, signature_id="adhoc", tool_name=tool_name,
         rationale="ad-hoc CLI invocation", prerequisites=(), planned_action=f"run {tool_name} against {host}:{port}",
@@ -527,6 +570,12 @@ def _adhoc_item(host: str, port: int, service: str, tool_name: str) -> AttackPla
 
 
 def _run_adhoc_audit(cfg: Config, run_id: Optional[int], host: str, port: int, service: str, tool_name: str) -> None:
+    from scripter.redteam.executor import execute_item
+    from scripter.redteam.models import ExecutionStatus
+    from scripter.redteam.storage import RedTeamStore
+    from scripter.scope import ScopeError, require_in_scope
+    from scripter.storage.db import Store
+
     try:
         require_in_scope(host, cfg.scope)
     except ScopeError as exc:
@@ -635,6 +684,10 @@ def redteam_diagnostics(
     run_id: Optional[int] = typer.Option(None, help="Run to compare (defaults to the latest run)."),
 ) -> None:
     """Compare this run's recorded host/port availability against the previous run. Local database only."""
+    from scripter.redteam.executor import execute_item
+    from scripter.redteam.storage import RedTeamStore
+    from scripter.storage.db import Store
+
     cfg = _load(config)
     with Store(cfg.storage.db_path) as store:
         rid = run_id or store.latest_run_id()

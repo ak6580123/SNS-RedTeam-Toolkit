@@ -75,19 +75,26 @@ retrying aggressively.
 
 ## Subprocess safety (optional nmap integration)
 
-`recon.enumeration.run_nmap_version_scan` is the only module that shells
-out (to `nmap`). Safety properties, matching the pattern used for every
-other subprocess call in this kind of tool:
+`recon.enumeration.run_nmap_version_scan` and `run_nmap_full_scan` are the
+only functions that shell out (to `nmap`). Safety properties, matching the
+pattern used for every other subprocess call in this kind of tool:
 
 - `subprocess.run` is always called with an **argument list**, never
   `shell=True` or a concatenated shell string.
 - The host argument is validated against a strict pattern (`_HOST_RE`,
   no leading `-`) before it reaches `nmap`'s argv, so a malformed/crafted
   target string can never be smuggled in as a flag.
-- Only `-sV` (service/version detection) is ever passed - no NSE
-  vulnerability/exploit scripts, no `-sS` raw-socket scanning, no root
-  privilege requirement.
-- Every subprocess call has an explicit `timeout_seconds`.
+- `run_nmap_version_scan` only ever passes `-sV` (service/version
+  detection) against the already-discovered port list. `run_nmap_full_scan`
+  (the TUI's Shift+D deep-scan action, `recon.enumeration.deep_scan_hosts`)
+  additionally passes `-p-` (all 65535 ports instead of a pre-filtered
+  list) and `-sC`, nmap's curated *default* script category - banner/
+  discovery scripts only; the separate *intrusive*/*exploit*/*brute*/*dos*
+  categories are never requested. Neither function ever uses `-sS`
+  raw-socket scanning or requires root privilege.
+- Every subprocess call has an explicit `timeout_seconds` (`[scan]
+  deep_scan_timeout_seconds` for the full-port sweep, since `-p- -sC`
+  against every port is far slower than the default port-list scan).
 - stdout/stderr are captured, not inherited, and never `eval`'d or
   interpreted as further commands.
 
